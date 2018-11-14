@@ -1,223 +1,303 @@
-// USAGE:
-//---------------------------------------------------------------------------------------------
-// - Set host serial terminal to 9600 baud
-// - To open a serial channel (numbered 0 - 7), send the number of the channel
-// - To issue a command, enter it directly to the console.
-//---------------------------------------------------------------------------------------------
-#include <SoftwareSerial.h>     //Include the software serial library  
-SoftwareSerial sSerial(11, 10); // RX, TX  - Name the software serial library sSerial (this cannot be omitted)
-                                // assigned to pins 10 and 11 for maximum compatibility
+#include <SoftwareSerial.h>
+#include <Wire.h>
+#include "RTClib.h"
+#include <SPI.h>
+#include <SD.h>
 
-const int s0 = 7;               //Arduino pin 7 to control pin S0
-const int s1 = 6;               //Arduino pin 6 to control pin S1
-const int enable_1 = 5;         //Arduino pin 5 to control pin E on shield 1
-const int enable_2 = 4;         //Arduino pin 4 to control pin E on shield 2
+SoftwareSerial sSerial(11, 10);
+Sd2Card card;
+RTC_DS3231 rtc;
+File file;
 
-char sensordata[32];              //A 30 byte character array to hold incoming data from the sensors
-byte computer_bytes_received = 0; //We need to know how many characters bytes have been received
-byte sensor_bytes_received = 0;   //We need to know how many characters bytes have been received
-int channel;                      //INT pointer for channel switching - 0-7 serial, 8-127 I2C addresses
-char *cmd;                        //Char pointer used in string parsing
-int retries;                      // com-check functions store number of retries here
-boolean answerReceived;           // com-functions store here if a connection-attempt was successful
-byte error;                       // error-byte to store result of Wire.transmissionEnd()
+const int s0 = 7;
+const int s1 = 6;
+const int enable_1 = 5;
+const int enable_2 = 4;
 
-String stamp_type;                // hold the name / type of the stamp
-char stamp_version[4];            // hold the version of the stamp
+int chipSelect = 10;
+bool cardIsUp = false;
+bool realTimeClockIsUp = false;
+String logFileName = "";
+DateTime dateTime;
 
-char computerdata[20];            //we make a 20 byte character array to hold incoming data from a pc/mac/other.
+char sensordata[32];
+byte computer_bytes_received = 0;
+byte sensor_bytes_received = 0;
+int channel;
+char *cmd;
+int retries;
+boolean answerReceived;
+byte error;
+
+String stamp_type;
+String pt_br_stamp_type;
+char stamp_version[4];
+
+char computerdata[20];
 int computer_in_byte;
 boolean computer_msg_complete = false;
 
-const long validBaudrates[] = { 38400, 19200, 9600, 115200, 57600 };//list of baudrates to try when connecting to a stamp (they're ordered by probability to speed up things a bit)
-long channelBaudrate[] = { 0, 0, 0, 0, 0, 0, 0, 0 };//store for the determined baudrates for every stamp
+const long validBaudrates[] = { 38400, 19200, 9600, 115200, 57600 };
+long channelBaudrate[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
-void serialPrintDivider() 
-{
-  Serial.println(  F("------------------"));
+void serialPrintDivider()
+{ 
+    Serial.println(  F("------------------")); 
 }
 
-void intro() //print intro
+void greetings()
 {
-    serialPrintDivider();
-    Serial.println( F("Whitebox Labs -- Tentacle Shield - Stamp Setup"));
-    Serial.println( F("For info type 'help'"));
-    Serial.println( F("To read current config from attached stamps type 'scan'"));
-    Serial.println( F(" (e.g. if you've changed baudrates)"));
-    Serial.println( F("TYPE CHANNEL NUMBER (Serial: 0-7):"));
+    Serial.println( F("    ##################################################"));
+    Serial.println( F("    # - Eric Ikeda - FuraoDataLogger - 2018/11/04  - #"));
+    Serial.println( F("    # - Tentacle Shield Integration - Version 0.01 - #"));
+    Serial.println( F("    ##################################################"));
+    delay(5000);
 }
 
-void help() //print help dialogue
+void get_sensor_type_in_portuguese()
 {
-    serialPrintDivider();
-    Serial.println( F("To open a serial channel (numbered 0 - 7), send the number of the channel"));
-    Serial.println( F("To issue a command, enter it directly to the console."));
-    Serial.println( F("To update information about connected stamps, type 'scan'."));
-    Serial.println( F(" -> This might take a while, it will scan all ports (serial)"));
-    Serial.println( F(" -> and determine correct baudrates."));
-    Serial.println( F("To set baudrate manually, type one of 38400,19200,9600,115200,57600"));
-    Serial.println( F("=========="));
-}
-
-void scan(boolean scanserial) // Scan for all devices. Set scanserial to false to scan I2C only (much faster!) 
-{
-    if (scanserial) 
+    if (stamp_type.equalsIgnoreCase("EZO pH"))
     {
-        Serial.println(F("Starting scan... this might take up to a minute."));
-    } 
+      pt_br_stamp_type = "percentual hidrogenionico";
+    }
+    else if (stamp_type.equalsIgnoreCase("EZO ORP"))
+    {
+      pt_br_stamp_type = "potencial de oxirreducao";
+    }
+    else if (stamp_type.equalsIgnoreCase("EZO DO"))
+    {
+      pt_br_stamp_type = "oxigenio dissolvido";
+    }
+    else if (stamp_type.equalsIgnoreCase("EZO EC"))
+    {
+      pt_br_stamp_type = "condutividade eletrica";
+    }
+    else if (stamp_type.equalsIgnoreCase("EZO RTD"))
+    {
+      pt_br_stamp_type = "temperatura";
+    }
+    else
+    {
+      pt_br_stamp_type = "Sensor nao identificado";
+    }
+}
 
+void addLineToLogFile(String stringLine)
+{
+  char buffFileName[19];
+  logFileName.toCharArray(buffFileName, 19);
+  
+  dateTime = rtc.now();
+  
+  file = SD.open(buffFileName, FILE_WRITE); 
+  if(file)
+  {
+    file.print(dateTime.year(), DEC);
+    file.print('-');
+    file.print(dateTime.month() < 10 ? "0" : "");
+    file.print(dateTime.month(), DEC);
+    file.print('-');
+    file.print(dateTime.day() < 10 ? "0" : "");
+    file.print(dateTime.day(), DEC);
+    file.print(' ');
+    file.print(dateTime.hour() < 10 ? "0" : "");
+    file.print(dateTime.hour(), DEC);
+    file.print(':');
+    file.print(dateTime.minute() < 10 ? "0" : "");
+    file.print(dateTime.minute(), DEC);
+    file.print(':');
+    file.print(dateTime.second() < 10 ? "0" : "");
+    file.print(dateTime.second(), DEC);
+    file.print('|');
+    file.println(stringLine);
+
+    file.close();
+    Serial.println("Linha adicionada ao log");
+  }
+}
+
+void scan(boolean scanserial)
+{
     int stamp_amount = 0;
 
     if (scanserial) 
     {
-        for (channel = 0; channel < 8; channel++) 
+        for (channel = 0; channel < 4; channel++) 
         {
             if (change_channel()) 
             {
+                String readings = "";
+                get_sensor_type_in_portuguese();
                 stamp_amount++;
-
                 serialPrintDivider();
                 Serial.print(    F("-- SERIAL CHANNEL "));
+                readings.concat("Serial Channel: ");
                 Serial.println(  channel);
-                Serial.println(  F("--"));
+                readings.concat(String(channel));
                 Serial.print(    F("-- Type: "));
-                Serial.println(  stamp_type);
-                Serial.print(    F("-- Baudrate: "));
-                Serial.println(  channelBaudrate[channel]);
+                readings.concat(" - Type: ");
+                Serial.print(  stamp_type);
+                readings.concat(String(stamp_type));
+                Serial.print(    F(", Version: "));
+                readings.concat(" - Version: ");
+                Serial.println(    stamp_version);
+                readings.concat(String(stamp_version));
+                Serial.print(    F("-- Obtendo: "));
+                readings.concat(" - Reading: ");
+                Serial.println(  pt_br_stamp_type);
+                readings.concat(String(pt_br_stamp_type));
+                Serial.print(F("> "));
+                Serial.println("r");
+                sSerial.print("r");
+                sSerial.print("\r");
+                delay(800);
+
+                if (sSerial.available() > 0)
+                {
+                    sensor_bytes_received = sSerial.readBytesUntil(13, sensordata, 30);
+                    sensordata[sensor_bytes_received] = 0;
+                    Serial.print(F("< "));
+                    Serial.println(sensordata);
+                    readings.concat(" - Value: ");
+                    readings.concat(String(sensordata));
+
+                    addLineToLogFile(readings);
+                    Serial.println(readings);
+                }
             }
         }
     }
+}
+
+void configSerial()
+{
+    pinMode(s1, OUTPUT);
+    pinMode(s0, OUTPUT);
+    pinMode(enable_1, OUTPUT);
+    pinMode(enable_2, OUTPUT);
+
+    Serial.begin(9600);
+    while (!Serial);
+    sSerial.begin(38400);
+    stamp_type.reserve(16);
+}
+
+bool isSecureDigitalCardUp()
+{
+  Serial.println("Iniciando Cartao SD...");
+  pinMode(chipSelect, OUTPUT);
+  digitalWrite(chipSelect, HIGH);
+  if (!SD.begin(chipSelect))
+  {
+    Serial.println("Ops...Falha na inicializacao do Cartao SD.");
+    return false;
+  }
+  Serial.println("Cartao SD iniciado!");
+  return true;
+}
+
+void settingRealTimeClockUp()
+{
+  if (rtc.lostPower()) 
+  {
+    //A linha abaixo ajusta o RTC em tempo de compilacao
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    //Ou pode-se utilizar linha abaixo para ajustar manualmente o RTC
+    //rtc.adjust(DateTime(2018, 1, 21, 3, 0, 0));
+  }
+}
+
+bool isRealTimeClockUp()
+{
+  if (!rtc.begin())
+  {
+    Serial.println("RTC nao inicializado...");
+    return false;
+  }
+  
+  Serial.println("RTC inicializado!");  
+  return true;
+}
+
+void formatLogFileName()
+{
+  dateTime = rtc.now();
+
+  logFileName.concat(String(dateTime.year()));
+  logFileName.concat(String(dateTime.month()));
+  logFileName.concat(String(dateTime.day()));
+  logFileName.concat(".csv");
 }
 
 void setup() 
 {
-    pinMode(s1, OUTPUT);       //Set the digital pin as output.
-    pinMode(s0, OUTPUT);       //Set the digital pin as output.
-    pinMode(enable_1, OUTPUT); //Set the digital pin as output.
-    pinMode(enable_2, OUTPUT); //Set the digital pin as output.
+  configSerial();
+  greetings();
 
-    Serial.begin(9600);     //Set the hardware serial port to 9600
-    while (!Serial) ;       //Leonardo-type arduinos need this to be able to write to the serial port in setup()
-    sSerial.begin(38400);   //Set the soft serial port to 38400
-    stamp_type.reserve(16); //reserve string buffer to save some SRAM
+  while(isSecureDigitalCardUp() == false)
+  {
+    cardIsUp = isSecureDigitalCardUp();
+    delay(1000);
+  }
 
-    intro(); //display startup message
+  realTimeClockIsUp = isRealTimeClockUp();
+
+  if(realTimeClockIsUp)
+  {
+    settingRealTimeClockUp();
+  }
+}
+
+bool isLogFileCreated()
+{
+  char buffFileName[19];
+  logFileName.toCharArray(buffFileName, 19);
+
+  if (!SD.exists(buffFileName)) 
+  {
+    //only open a new file if it doesn't exist
+    Serial.print("===>>>Arquivo de log aberto: ");
+    Serial.println(logFileName);
+    file = SD.open(buffFileName, FILE_WRITE); 
+    if(file)
+    {
+      file.close();
+      Serial.println("Arquivo encontrado ou criado.");
+    }
+  }
+
+  if (!SD.exists(buffFileName)) 
+  {
+    Serial.println("Nao foi possivel criar o arquivo...");
+    return false;
+  }
+  
+  Serial.print("Nome do arquivo de log: ");
+  Serial.println(logFileName);
+  return true;
 }
 
 void loop() 
 {
-    while (Serial.available() > 0) // While there is serial data from the computer
-    {
-        computer_in_byte = Serial.read(); // read a byte
+  Serial.println("Looping Principal");
+  logFileName = "";
+  formatLogFileName();
+  isLogFileCreated();
 
-        if (computer_in_byte == '\n' || computer_in_byte == '\r') // if a newline character arrives, we assume a complete command has been received
-        {
-            computerdata[computer_bytes_received] = 0;
-            computer_msg_complete = true;
-            computer_bytes_received = 0;
-        } 
-        else //command not complete yet, so just ad the byte to data array
-        {
-            computerdata[computer_bytes_received] = computer_in_byte;
-            computer_bytes_received++;
-        }
-    }
+  scan(true);
 
-    if (computer_msg_complete) //if there is a complete command from the computer
-    {
-        cmd = computerdata;  //Set cmd with incoming serial data
-        if (String(cmd) == F("help")) //if help entered...
-        {
-            help(); //call help dialogue
-            computer_msg_complete = false;  //Reset the var computer_bytes_received to equal 0
-            return;
-        }
-        else if (String(cmd) == F("scan")) //if scan requested
-        {
-            scan(true);
-            computer_msg_complete = false;  //Reset the var computer_bytes_received to equal 0
-            return;
-        }
-        else //it's not a known command, so probaby it's a channel number
-        {
-            //TODO: without loop?
-            for (int x = 0; x <= 8; x++) //loop through input searching for a channel change request (integer between 1 and 127)
-            {    
-                if (String(cmd) == String(x)) 
-                {
-                    Serial.print(F("changing channel to "));
-                    Serial.println( cmd);
-                    channel = atoi(cmd); //set channel variable to number 0-127
-                    if (change_channel()) //set MUX switches or I2C address
-                    {
-                        Serial.println(  F("-------------------------------------"));
-                        Serial.print(    F("ACTIVE channel : "));
-                        Serial.println(  channel );
-                        Serial.print(    F("Type: "));
-                        Serial.print(    stamp_type);
-                        Serial.print(    F(", Version: "));
-                        Serial.print(    stamp_version);
-                        Serial.print(    F(", COM: "));
-
-                        Serial.print(  F("UART ("));
-                        Serial.print(  String(channelBaudrate[channel]));
-                        Serial.println(F(" baud)"));
-                    }
-                    else 
-                    {
-                        Serial.println(F("CHANNEL NOT AVAILABLE! Empty slot? Different COM-mode?"));
-                        Serial.println(F("Try 'scan' or set baudrate manually (see 'help')."));
-                    }
-                    computer_msg_complete = false; //Reset the var computer_bytes_received to equal 0
-                    return;
-                }
-            }
-
-            for ( int x = 0; x < 5; x++) // check if a baudrate was entered manually
-            {
-                if (String(cmd) == String(validBaudrates[x])) 
-                {
-                    Serial.print(F("Setting baudrate manually to "));
-                    Serial.println(validBaudrates[x]);
-                    channelBaudrate[channel] = validBaudrates[x];
-                    String(channel).toCharArray(cmd, 4); //do a "fake" command for the next loop-run, as if the channel number was entered again (will refresh info with the manually set baudrate)
-                    return; //do not set computer_bytes_received to 0, so the channel-command gets handled right away
-                }
-            }
-
-            if (String(cmd).startsWith(F("serial,"))) 
-            {
-                Serial.println(F("! when switching from i2c to serial or vice-versa,"));
-                Serial.println(F("! don't forget to switch the hardware jumpers accordingly."));
-            }
-        }
-
-        Serial.print(F("> "));// echo to the serial console
-        Serial.println(cmd);
-        sSerial.print(cmd);   //Send the command from the computer to the Atlas Scientific device using the softserial port
-        sSerial.print("\r");  //After we send the command we send a carriage return <CR>
-
-        computer_msg_complete = false;          //Reset the var computer_bytes_received to equal 0
-    }
-
-    if (sSerial.available() > 0) //If data has been transmitted from an Atlas Scientific device
-    {
-        sensor_bytes_received = sSerial.readBytesUntil(13, sensordata, 30); //we read the data sent from the Atlas Scientific device until we see a <CR>. We also count how many character have been received
-        sensordata[sensor_bytes_received] = 0; //we add a 0 to the spot in the array just after the last character we received. This will stop us from transmitting incorrect data that may have been left in the buffer
-        Serial.print(F("< "));
-        Serial.println(sensordata); //let’s transmit the data received from the Atlas Scientific device to the serial monitor
-    }
+  delay(60000);
 }
 
-boolean change_channel() //function controls which UART/I2C port is opened. returns true if channel could be changed.
+boolean change_channel()
 {
   stamp_type = "";
-  memset(stamp_version, 0, sizeof(stamp_version)); // clear stamp info
-  change_serial_mux_channel();                     // configure serial muxer(s) (or disable if we're in I2C mode)
+  memset(stamp_version, 0, sizeof(stamp_version));
+  change_serial_mux_channel();
 
-  if (channel < 8) //serial?
+  if (channel < 8)
   {
-    if (!check_serial_connection()) //determine and set the correct baudrate for this stamp
+    if (!check_serial_connection())
     {
       return false;
     }
@@ -225,16 +305,16 @@ boolean change_channel() //function controls which UART/I2C port is opened. retu
   return true;
 }
 
-void change_serial_mux_channel() //configures the serial muxers depending on channel.
+void change_serial_mux_channel()
 {
-    switch (channel) //Looking to see what channel to open
+    switch (channel)
     {
-        case 0:                                  //If channel==0 then we open channel 0
-            digitalWrite(enable_1, LOW);           //Setting enable_1 to low activates primary channels: 0,1,2,3
-            digitalWrite(enable_2, HIGH);          //Setting enable_2 to high deactivates secondary channels: 4,5,6,7
-            digitalWrite(s0, LOW);                 //S0 and S1 control what channel opens
-            digitalWrite(s1, LOW);                 //S0 and S1 control what channel opens
-        break;                                 //Exit switch case
+        case 0:
+            digitalWrite(enable_1, LOW);
+            digitalWrite(enable_2, HIGH);
+            digitalWrite(s0, LOW);
+            digitalWrite(s1, LOW);
+        break;
 
         case 1:
             digitalWrite(enable_1, LOW);
@@ -286,14 +366,14 @@ void change_serial_mux_channel() //configures the serial muxers depending on cha
         break;
 
         default:
-            digitalWrite(enable_1, HIGH);   //disable soft serial
-            digitalWrite(enable_2, HIGH);   //disable soft serial
+            digitalWrite(enable_1, HIGH);
+            digitalWrite(enable_2, HIGH);
     }
 }
 
-boolean check_serial_connection() // check the selected serial port. find and set baudrate, request info from the stamp
-{                                 // will return true if there is a stamp on this serial channel, false otherwise
-    answerReceived = true; //will hold if we received any answer. also true, if no "correct" baudrate has been found, but still something answered.
+boolean check_serial_connection()
+{
+    answerReceived = true;
     retries = 0;
 
     if (channelBaudrate[channel] > 0) 
@@ -308,33 +388,32 @@ boolean check_serial_connection() // check the selected serial port. find and se
             }
         }
     }
-    answerReceived = true; //will hold if we received any answer. also true, if no "correct" baudrate has been found, but still something answered.
+    answerReceived = true;
 
-    while (retries < 3 && answerReceived == true) //we don't seem to know the correct baudrate yet. try it 3 times (in case it doesn't work right away)
+    while (retries < 3 && answerReceived == true)
     {
-        answerReceived = false; // we'll toggle this to know if we received an answer, even if no baudrate matched. probably a com-error, so we'll just retry.
+        answerReceived = false;
         if (scan_baudrates()) 
         {
             return true;
         }
         retries++;
     }
-    return false;  //no stamp was found at this channel
+    return false;
 }
 
-boolean scan_baudrates() //scans baudrates to auto-detect the right one for this uart channel. if one is found, it is saved globally in channelBaudrate[]
+boolean scan_baudrates()
 {
-    for (int j = 0; j < 5; j++) // TODO: make this work for legacy stuff and EZO in uart / continuous mode
+    for (int j = 0; j < 5; j++)
     {
-        sSerial.begin(validBaudrates[j]); //open soft-serial port with a baudrate
+        sSerial.begin(validBaudrates[j]);
         sSerial.print(F("\r"));
-        sSerial.flush();                  //buffers are full of junk, clean up
-        sSerial.print(F("c,0\r"));        //switch off continuous mode for new ezo-style stamps
+        sSerial.flush();
+        sSerial.print(F("c,0\r"));
         delay(150);
-        //clearIncomingBuffer();          //buffers are full of junk, clean up
-        sSerial.print(F("e\r"));   //switch off continous mode for legacy stamps
+        sSerial.print(F("e\r"));
 
-        delay(150);             //give the stamp some time to burp an answer
+        delay(150);
         clearIncomingBuffer();
 
         int r_retries = 0;
@@ -342,65 +421,51 @@ boolean scan_baudrates() //scans baudrates to auto-detect the right one for this
         while (r_retries < 3 && answerReceived == true) 
         {
             answerReceived = false;
-            if (request_serial_info()) //check baudrate for correctness by parsing the answer to "i"-command
+            if (request_serial_info())
             {
-                channelBaudrate[channel] = validBaudrates[j];  //we found the correct baudrate!
+                channelBaudrate[channel] = validBaudrates[j];
                 return true;
             }
             r_retries++;
         }
     }
-    return false; //we could not determine a correct baudrate
+    return false;
 }
 
-void clearIncomingBuffer() // "clears" the incoming soft-serial buffer
+void clearIncomingBuffer()
 {          
     while (sSerial.available() ) 
     {
-        //Serial.print((char)sSerial.read());
         sSerial.read();
     }
 }
 
-boolean request_serial_info() // helper to request info from a uart stamp and parse the answer into the global stamp_ variables
+boolean request_serial_info()
 {
     clearIncomingBuffer();
-    sSerial.write("i");   // send "i" which returns info on all versions of the stamps
+    sSerial.write("i");
     sSerial.write("\r");
 
-    delay(150);           //give it some time to send an answer
+    delay(150);
 
-    sensor_bytes_received = sSerial.readBytesUntil(13, sensordata, 9);  //we read the data sent from the Atlas Scientific device until we see a <CR>. We also count how many character have been received
+    sensor_bytes_received = sSerial.readBytesUntil(13, sensordata, 9);
 
-    if (sensor_bytes_received > 0) //there's an answer
+    if (sensor_bytes_received > 0)
     {
-        answerReceived = true;     //so we can globally know if there was an answer on this channel
+        answerReceived = true;
 
-        if ( parseInfo() ) // try to parse the answer string
+        if (parseInfo())
         {
             delay(100);
-            clearIncomingBuffer(); // some stamps burp more info (*OK or something). we're not interested yet.
+            clearIncomingBuffer();
             return true;
         }
     }
-    return false; // it was not possible to get info from the stamp
+    return false;
 }
 
-boolean parseInfo() // parses the answer to a "i" command. returns true if answer was parseable, false if not.
+boolean parseInfo()
 { 
-    // example:
-    // PH EZO  -> '?I,pH,1.1'
-    // ORP EZO -> '?I,OR,1.0'   (-> wrong in documentation 'OR' instead of 'ORP')
-    // DO EZO  -> '?I,D.O.,1.0' || '?I,DO,1.7' (-> exists in D.O. and DO form)
-    // EC EZO  -> '?I,EC,1.0 '
-    // TEMP EZO-> '?I,RTD,1.2'
-
-
-    // Legazy PH  -> 'P,V5.0,5/13'
-    // Legazy ORP -> 'O,V4.4,2/13'
-    // Legazy DO  -> 'D,V5.0,1/13'
-    // Legazy EC  -> 'E,V3.1,5/13'
-
     if (sensordata[0] == '?' && sensordata[1] == 'I')// seems to be an EZO stamp 
     {
         // PH EZO
@@ -512,6 +577,6 @@ boolean parseInfo() // parses the answer to a "i" command. returns true if answe
         stamp_version[3] = 0;
         return true;
     }
-    return false;        // can not parse this info-string
+    return false;
   }
 }
